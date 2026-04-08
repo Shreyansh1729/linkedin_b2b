@@ -1,0 +1,16 @@
+__pycache__/
+.idea/
+.venv/
+.pytest_cache/
+.vscode
+.dockerignore
+.env
+
+/linkedin_state.json
+/.coverage
+/venv/
+/linkedin/management/commands/export_model.py
+/db.sqlite3
+/media/
+.cache/
+tests/fixtures/pages/**/*.html
