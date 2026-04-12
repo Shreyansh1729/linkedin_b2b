@@ -9,7 +9,11 @@ langchain-google-genai
 jinja2
 termcolor
 Django>=5.2,<7.0
-tendo
+tenacity
+numpy
+scipy
+joblib
+cryptography
 pyyaml
 fastembed
 scikit-learn
@@ -17,3 +21,5 @@ huggingface_hub
 django-unfold
 django-cors-headers
 questionary
+django-import-export
+django-simple-history

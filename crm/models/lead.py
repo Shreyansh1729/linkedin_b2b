@@ -4,6 +4,7 @@ import numpy as np
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from simple_history.models import HistoricalRecords
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,16 @@ class Lead(models.Model):
     public_identifier = models.CharField(max_length=200, unique=True)
     profile_data = models.JSONField(null=True, blank=True, default=None)
     embedding = models.BinaryField(null=True, blank=True)
-    disqualified = models.BooleanField(default=False)
+    disqualified = models.BooleanField(
+        default=False,
+        help_text="PERMANENT GLOBAL BAN. If set, this person will NEVER be contacted again by ANY campaign. "
+                  "For campaign-specific disqualification, use the Deal's closing reason instead."
+    )
+
     creation_date = models.DateTimeField(default=timezone.now)
     update_date = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords(excluded_fields=["embedding", "profile_data"])
 
     def __str__(self):
         name = f"{self.first_name} {self.last_name}".strip()

@@ -27,12 +27,9 @@ class Command(BaseCommand):
             "SearchKeywords (to reset)": SearchKeyword.objects.count(),
         }
 
-        campaigns_with_models = Campaign.objects.exclude(model_blob=None).count()
-
         self.stdout.write("Will delete:")
         for name, count in counts.items():
             self.stdout.write(f"  {name}: {count}")
-        self.stdout.write(f"  Campaign model blobs: {campaigns_with_models}")
 
         if not options["yes"]:
             confirm = input("\nProceed? [y/N] ")
@@ -47,8 +44,5 @@ class Command(BaseCommand):
 
         # Reset search keywords to unused
         SearchKeyword.objects.update(used=False, used_at=None)
-
-        # Clear GP model blobs
-        Campaign.objects.exclude(model_blob=None).update(model_blob=None)
 
         self.stdout.write(self.style.SUCCESS("Reset complete."))

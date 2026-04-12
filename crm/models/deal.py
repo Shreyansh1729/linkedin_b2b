@@ -3,6 +3,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from linkedin.enums import ProfileState
+from simple_history.models import HistoricalRecords
 
 
 class ClosingReason(models.TextChoices):
@@ -39,6 +40,8 @@ class Deal(models.Model):
     backoff_hours = models.IntegerField(default=0)
     creation_date = models.DateTimeField(default=timezone.now)
     update_date = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
 
     def __str__(self):
         lead_str = str(self.lead) if self.lead_id else "?"

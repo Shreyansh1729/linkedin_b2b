@@ -1,14 +1,46 @@
-# linkedin/models.py
-from __future__ import annotations
-
 import logging
+import base64
+import os
 from datetime import date, timedelta
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
 from django.utils import timezone
+from cryptography.fernet import Fernet
+from simple_history.models import HistoricalRecords
 
 logger = logging.getLogger(__name__)
+
+def _get_cipher():
+    # [NEW-CRIT-02] Use dedicated environment variable for encryption
+    from django.core.exceptions import ImproperlyConfigured
+    raw_key = os.environ.get("LEADPILOT_ENCRYPTION_KEY", "").encode()
+    if not raw_key or len(raw_key) < 32:
+        if settings.DEBUG:
+            # Secure fallback for local dev: use SECRET_KEY derived key
+            import hashlib
+            key = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+            return Fernet(base64.urlsafe_b64encode(key))
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured("LEADPILOT_ENCRYPTION_KEY must be set to a 32-byte string in production.")
+    
+    key = base64.urlsafe_b64encode(raw_key[:32])
+    return Fernet(key)
+
+def encrypt_value(value: str) -> str:
+    if not value: return ""
+    cipher = _get_cipher()
+    return cipher.encrypt(value.encode()).decode()
+
+def decrypt_value(value: str) -> str:
+    if not value: return ""
+    try:
+        cipher = _get_cipher()
+        return cipher.decrypt(value.encode()).decode()
+    except Exception:
+        return value # Fallback for old plaintext data during transition
+
 
 # action_type → (daily_limit_field, weekly_limit_field)
 _RATE_LIMIT_FIELDS = {
@@ -32,12 +64,27 @@ class SiteConfig(models.Model):
     def __str__(self):
         return "Site Configuration"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.llm_api_key and self.llm_api_key.startswith('gAAAA'):
+            self.llm_api_key = decrypt_value(self.llm_api_key)
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        if self.llm_api_key and self.llm_api_key.startswith('gAAAA'):
+            self.llm_api_key = decrypt_value(self.llm_api_key)
+
     def save(self, *args, **kwargs):
+        plain_key = self.llm_api_key
+        if self.llm_api_key and not self.llm_api_key.startswith('gAAAA'):
+            self.llm_api_key = encrypt_value(self.llm_api_key)
         self.pk = 1
         super().save(*args, **kwargs)
+        self.llm_api_key = plain_key
 
     @classmethod
     def load(cls) -> "SiteConfig":
+
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
 
@@ -48,10 +95,42 @@ class Campaign(models.Model):
     product_docs = models.TextField(blank=True)
     campaign_objective = models.TextField(blank=True)
     booking_link = models.URLField(max_length=500, blank=True)
-    is_freemium = models.BooleanField(default=False)
+    is_freemium = models.BooleanField(
+        default=False, 
+        help_text="Uses a pre-trained kit model instead of active learning. Optimized for standard hiring/sales personas."
+    )
+
     action_fraction = models.FloatField(default=0.2)
     seed_public_ids = models.JSONField(default=list, blank=True)
-    model_blob = models.BinaryField(null=True, blank=True)
+
+    def _get_model_path(self):
+        return settings.BASE_DIR / "models" / f"campaign_{self.pk}.joblib"
+
+    def save_ml_model(self, pipeline):
+        import joblib
+        path = self._get_model_path()
+        path.parent.mkdir(exist_ok=True)
+        joblib.dump(pipeline, path)
+        # Touch update_date or similar if needed, or just log
+        logger.debug("Saved ML model to %s", path)
+
+    def load_ml_model(self):
+        import joblib
+        path = self._get_model_path()
+        if path.exists():
+            try:
+                return joblib.load(path)
+            except Exception:
+                logger.warning("Failed to load ML model from %s", path)
+        
+        if self.is_freemium:
+            kit_path = settings.BASE_DIR / "models" / "kit.joblib"
+            if kit_path.exists():
+                try:
+                    return joblib.load(kit_path)
+                except Exception:
+                    logger.warning("Failed to load kit ML model from %s", kit_path)
+        return None
 
     def __str__(self):
         return self.name
@@ -87,6 +166,20 @@ class LinkedInProfile(models.Model):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._exhausted: dict[str, date] = {}
+        if self.linkedin_password and self.linkedin_password.startswith('gAAAA'):
+            self.linkedin_password = decrypt_value(self.linkedin_password)
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        if self.linkedin_password and self.linkedin_password.startswith('gAAAA'):
+            self.linkedin_password = decrypt_value(self.linkedin_password)
+
+    def save(self, *args, **kwargs):
+        plain_password = self.linkedin_password
+        if self.linkedin_password and not self.linkedin_password.startswith('gAAAA'):
+            self.linkedin_password = encrypt_value(self.linkedin_password)
+        super().save(*args, **kwargs)
+        self.linkedin_password = plain_password
 
     def can_execute(self, action_type: str) -> bool:
         """Check if the action is allowed under daily/weekly rate limits."""
@@ -150,8 +243,12 @@ class LinkedInProfile(models.Model):
             created_at__gte=monday,
         ).count()
 
+    def __repr__(self):
+        return f"{self.user.username} ({self.linkedin_username})"
+
     def __str__(self):
         return f"{self.user.username} ({self.linkedin_username})"
+
 
     class Meta:
         app_label = "linkedin"
@@ -242,15 +339,23 @@ class Task(models.Model):
         RUNNING = "running"
         COMPLETED = "completed"
         FAILED = "failed"
+        SKIPPED = "skipped"
 
     task_type = models.CharField(max_length=20, choices=TaskType.choices)
+    deal = models.ForeignKey(
+        "crm.Deal", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="tasks", help_text="The deal this task targets (allows fast indexing)"
+    )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+
     scheduled_at = models.DateTimeField()
     payload = models.JSONField(default=dict)
     error = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    history = HistoricalRecords()
 
     objects = TaskQuerySet.as_manager()
 
@@ -270,10 +375,17 @@ class Task(models.Model):
 
     def mark_completed(self):
         self.status = self.Status.COMPLETED
-        self.completed_at = timezone.now()
-        self.save(update_fields=["status", "completed_at"])
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "ended_at"])
+
+    def mark_skipped(self, reason: str = ""):
+        self.status = self.Status.SKIPPED
+        self.error = reason
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "error", "ended_at"])
 
     def mark_failed(self, error: str):
         self.status = self.Status.FAILED
         self.error = error
-        self.save(update_fields=["status", "error"])
+        self.ended_at = timezone.now()
+        self.save(update_fields=["status", "error", "ended_at"])

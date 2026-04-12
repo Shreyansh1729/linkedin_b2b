@@ -27,10 +27,11 @@ class SiteConfigAdmin(ModelAdmin):
 
 @admin.register(Campaign)
 class CampaignAdmin(ModelAdmin):
-    list_display = ("name", "discovered_count", "credits_used", "connected_count", "failed_count")
-    list_filter = ("is_freemium",)
+    list_display = ("name", "is_freemium", "discovered_count", "connected_count", "failed_count", "import_leads_button")
+    list_filter = ("is_freemium", "users")
     search_fields = ("name",)
     icon = "send"
+    actions_detail = ["import_leads_action"]
     
     fieldsets = (
         (_("Campaign Configuration"), {
@@ -45,60 +46,86 @@ class CampaignAdmin(ModelAdmin):
         super().save_model(request, obj, form, change)
         obj.users.add(request.user)
 
+    def get_queryset(self, request):
+        from django.db.models import Count, Q
+        from linkedin.enums import ProfileState
+        return super().get_queryset(request).annotate(
+            n_discovered=Count("deals"),
+            n_connected=Count("deals", filter=Q(deals__state=ProfileState.CONNECTED)),
+            n_failed=Count("deals", filter=Q(deals__state=ProfileState.FAILED)),
+        )
+
     def discovered_count(self, obj):
-        return obj.deals.count()
+        return getattr(obj, "n_discovered", 0)
     discovered_count.short_description = _("Discovered")
 
-    def credits_used(self, obj):
-        return obj.action_logs.count()
-    credits_used.short_description = _("Credits (Sent)")
-
     def connected_count(self, obj):
-        return obj.deals.filter(state="CONNECTED").count()
+        return getattr(obj, "n_connected", 0)
     connected_count.short_description = _("Connected")
 
     def failed_count(self, obj):
-        return obj.deals.filter(state="FAILED").count()
+        return getattr(obj, "n_failed", 0)
     failed_count.short_description = _("Failed")
+
+    def import_leads_button(self, obj):
+        from django.urls import reverse
+        from django.utils.html import format_html
+        return format_html(
+            '<a href="{}" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-1 px-3 rounded text-[10px] uppercase transition-colors">'
+            'Import Leads</a>',
+            reverse("admin:linkedin_campaign_changelist") + f"?action=import_leads_action&_selected_action={obj.pk}"
+        )
+    import_leads_button.short_description = "Quick Import"
 
     actions = ["import_leads_action"]
 
+
     @admin.action(description="Import Leads from CSV")
     def import_leads_action(self, request, queryset):
-        if request.method == "POST" and "csv_file" in request.FILES:
-            from linkedin.setup.seeds import parse_seed_csv, create_seed_leads
-            public_ids, skipped = parse_seed_csv(request.FILES["csv_file"].read())
-            
-            if not public_ids:
-                self.message_user(request, "No valid LinkedIn URLs found in the uploaded file.", level="WARNING")
-                return HttpResponseRedirect(request.get_full_path())
+        from django import forms
+        from django.core.validators import FileExtensionValidator
+        from django.shortcuts import render
+        from linkedin.setup.seeds import parse_seed_csv, create_seed_leads
 
-            for campaign in queryset:
-                create_seed_leads(campaign, public_ids)
+        class CSVImportForm(forms.Form):
+            csv_file = forms.FileField(
+                label="Select CSV file",
+                validators=[FileExtensionValidator(allowed_extensions=['csv'])]
+            )
+
+        if 'apply' in request.POST:
+            form = CSVImportForm(request.POST, request.FILES)
+            if form.is_valid():
+                csv_file = request.FILES['csv_file']
+                if csv_file.size > 5 * 1024 * 1024:  # 5MB Cap
+                    self.message_user(request, "File too large (max 5MB).", level="ERROR")
+                    return HttpResponseRedirect(request.get_full_path())
                 
-            self.message_user(request, f"Successfully imported {len(public_ids)} leads for {queryset.count()} campaign(s).")
-            return HttpResponseRedirect(request.get_full_path())
+                public_ids, skipped = parse_seed_csv(csv_file.read())
+                
+                if not public_ids:
+                    self.message_user(request, "No valid LinkedIn URLs found.", level="WARNING")
+                    return HttpResponseRedirect(request.get_full_path())
 
-        # Render a simple form
-        form_html = """
-        <form method="post" enctype="multipart/form-data" style="margin: 20px; font-family: sans-serif;">
-            <h2>Upload a CSV file with LinkedIn URLs</h2>
-            <p>We will scan every column for LinkedIn Profile URLs.</p>
-            <input type="hidden" name="csrfmiddlewaretoken" value="{csrf}">
-            <input type="hidden" name="action" value="import_leads_action">
-            {selected}
-            <div style="margin: 20px 0;">
-                <input type="file" name="csv_file" accept=".csv" required>
-            </div>
-            <button type="submit" style="padding: 10px 20px; background: #4f46e5; color: white; border: none; border-radius: 5px; cursor: pointer;">Upload and Import</button>
-        </form>
-        """
-        
-        from django.middleware.csrf import get_token
-        csrf = get_token(request)
-        selected_inputs = "".join(f'<input type="hidden" name="{admin.ACTION_CHECKBOX_NAME}" value="{obj.pk}">' for obj in queryset)
-        
-        return HttpResponse(form_html.format(csrf=csrf, selected=selected_inputs))
+                for campaign in queryset:
+                    create_seed_leads(campaign, public_ids)
+                    
+                self.message_user(request, f"Successfully imported {len(public_ids)} leads for {queryset.count()} campaign(s).")
+                return HttpResponseRedirect(request.get_full_path())
+        else:
+            form = CSVImportForm()
+
+        return render(
+            request,
+            "admin/csv_import.html",
+            {
+                'queryset': queryset,
+                'form': form,
+                'action': 'import_leads_action',
+                'title': 'Import Leads from CSV'
+            }
+        )
+
 
 
 @admin.register(LinkedInProfile)
@@ -174,38 +201,50 @@ class ActionLogAdmin(ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("campaign", "linkedin_profile")
+
+from simple_history.admin import SimpleHistoryAdmin
+
 @admin.register(Task)
-class TaskAdmin(ModelAdmin):
+class TaskAdmin(SimpleHistoryAdmin, ModelAdmin):
     list_display = ("task_type", "target_info", "status_pill", "error_preview", "scheduled_at")
     list_filter = ("task_type", "status")
     readonly_fields = (
         "task_type", "status", "scheduled_at", "payload", "error",
-        "created_at", "started_at", "completed_at",
+        "created_at", "started_at", "ended_at",
     )
     icon = "clipboard_list"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("deal__lead")
     
     def status_pill(self, obj):
-        colors = {"pending": "gray", "running": "blue", "completed": "green", "failed": "red"}
-        color_class = f"bg-{colors.get(obj.status, 'gray')}-100 text-{colors.get(obj.status, 'gray')}-800"
+        colors = {"pending": "gray", "running": "blue", "completed": "green", "failed": "red", "skipped": "indigo"}
+        color_key = obj.status.lower()
+        color_name = colors.get(color_key, "gray")
+        color_class = f"bg-{color_name}-100 text-{color_name}-800"
         return format_html('<span class="{} px-3 py-1 rounded-full text-xs font-bold">{}</span>', color_class, obj.status.upper())
     status_pill.short_description = "Status"
     
     def target_info(self, obj):
-        from crm.models import Lead
-        public_id = obj.payload.get("public_id")
-        if not public_id:
-            return "-"
+        # Optimized: Use pre-cached deal__lead from select_related
+        deal = obj.deal
+        lead = deal.lead if deal else None
         
-        lead = Lead.objects.filter(public_identifier=public_id).first()
-        name = f"{lead.first_name} {lead.last_name}" if lead and (lead.first_name or lead.last_name) else public_id
-        url = lead.linkedin_url if lead else f"https://www.linkedin.com/in/{public_id}/"
+        if not lead:
+            public_id = obj.payload.get("public_id", "Unknown")
+            return format_html('<span class="text-gray-400">{}</span>', public_id)
+        
+        name = f"{lead.first_name} {lead.last_name}" if (lead.first_name or lead.last_name) else lead.public_identifier
+        url = lead.linkedin_url
         
         return format_html(
             '<div class="flex flex-col">'
             '<span class="font-bold text-gray-900">{}</span>'
             '<a href="{}" target="_blank" class="text-xs text-blue-600 hover:underline">{} &nearr;</a>'
             '</div>',
-            name, url, public_id
+            name, url, lead.public_identifier
         )
     target_info.short_description = "Prospect Identity"
 
@@ -220,6 +259,7 @@ class TaskAdmin(ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(ModelAdmin):
@@ -243,26 +283,33 @@ class ChatMessageAdmin(ModelAdmin):
             
             public_id = None
             campaign_id = None
-            
+            deal = None
+
             obj = draft.content_object
             if obj and obj.__class__.__name__ == "Deal":
+                deal = obj
                 public_id = obj.lead.public_identifier
                 campaign_id = obj.campaign.pk
             elif obj and obj.__class__.__name__ == "Lead":
-                public_id = obj.public_identifier
                 deal = obj.deal_set.first()
+                public_id = obj.public_identifier
                 if deal:
                     campaign_id = deal.campaign.pk
 
+            # Override with draft.campaign if available (deterministic routing)
+            if draft.campaign:
+                campaign_id = draft.campaign.pk
+            
             if public_id and campaign_id:
                 Task.objects.create(
                     task_type="send_message",
                     status="pending",
                     scheduled_at=timezone.now(),
+                    deal=deal,
                     payload={
                         "message_id": draft.pk,
                         "public_id": public_id,
-                        "campaign_id": campaign_id
+                        "campaign_id": campaign_id,
                     }
                 )
                 count += 1
@@ -272,7 +319,7 @@ class ChatMessageAdmin(ModelAdmin):
     def display_content(self, obj):
         if obj.is_draft:
             color = "bg-purple-50 text-purple-700 border border-purple-200"
-            label = "AI DRAFT - NEEDS APPROVAL"
+            label = "DRAFT - NEEDS APPROVAL"
         else:
             color = "bg-green-50 text-green-700" if obj.is_outgoing else "bg-gray-100 text-gray-700"
             label = "OUTGOING" if obj.is_outgoing else "INCOMING"
@@ -291,3 +338,6 @@ class ChatMessageAdmin(ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("owner")

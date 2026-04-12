@@ -18,7 +18,7 @@ from linkedin.db.deals import increment_connect_attempts, set_profile_state
 from linkedin.db.leads import disqualify_lead
 from linkedin.models import ActionLog, Task
 from linkedin.enums import ProfileState
-from linkedin.exceptions import ReachedConnectionLimit, SkipProfile
+from linkedin.exceptions import ReachedConnectionLimit, SkipProfile, TaskSkipped
 
 logger = logging.getLogger(__name__)
 
@@ -82,22 +82,19 @@ def _seconds_until_tomorrow() -> float:
 def handle_connect(task, session, qualifiers):
     from linkedin.actions.connect import send_connection_request
     from linkedin.actions.status import get_connection_status
+    from crm.models import Deal
 
     cfg = CAMPAIGN_CONFIG
     campaign = session.campaign
     campaign_id = campaign.pk
     strategy = strategy_for(campaign, qualifiers)
 
-    def _reschedule():
-        elapsed = (timezone.now() - task.started_at).total_seconds() if task.started_at else 0
-        enqueue_connect(campaign_id, delay_seconds=strategy.compute_delay(elapsed))
-
-    # --- Rate limit check ---
+    # --- FIRST: rate limit check (cheapest gate) ---
     if not session.linkedin_profile.can_execute(ActionLog.ActionType.CONNECT):
         enqueue_connect(campaign_id, delay_seconds=_seconds_until_tomorrow())
-        return
+        raise TaskSkipped("Daily/Weekly connection limit reached.")
 
-    # --- Get candidate ---
+    # --- THEN: find candidate ---
     candidate = strategy.find_candidate(session)
     if candidate is None:
         enqueue_connect(campaign_id, delay_seconds=cfg["connect_no_candidate_delay_seconds"])
@@ -107,16 +104,20 @@ def handle_connect(task, session, qualifiers):
     profile = candidate.get("profile") or candidate
 
     # Freemium campaigns need a Deal before set_profile_state
+    deal = None
     if strategy.pre_connect:
-        strategy.pre_connect(session, public_id)
+        deal = strategy.pre_connect(session, public_id)
 
-    from linkedin.url_utils import public_id_to_url
-    from crm.models import Deal
+    if deal is None:
+        deal = Deal.objects.filter(
+            lead__public_identifier=public_id,
+            campaign=session.campaign,
+        ).first()
 
-    deal = Deal.objects.filter(
-        lead__linkedin_url=public_id_to_url(public_id),
-        campaign=session.campaign,
-    ).first()
+    def _reschedule():
+        elapsed = (timezone.now() - task.started_at).total_seconds() if task.started_at else 0
+        enqueue_connect(campaign_id, delay_seconds=strategy.compute_delay(elapsed), deal=deal)
+
     reason = deal.reason if deal else ""
     stats = strategy.qualifier.explain(candidate, session) if strategy.qualifier else ""
     logger.info("[%s] %s", campaign, colored("\u25b6 connect", "cyan", attrs=["bold"]))
@@ -127,7 +128,7 @@ def handle_connect(task, session, qualifiers):
 
         if status == ProfileState.CONNECTED:
             set_profile_state(session, public_id, status.value)
-            enqueue_follow_up(campaign_id, public_id)
+            enqueue_follow_up(campaign_id, public_id, deal=deal)
             _reschedule()
             return
 
@@ -136,6 +137,7 @@ def handle_connect(task, session, qualifiers):
             enqueue_check_pending(
                 campaign_id, public_id,
                 backoff_hours=cfg["check_pending_recheck_after_hours"],
+                deal=deal
             )
             _reschedule()
             return
@@ -169,15 +171,16 @@ def handle_connect(task, session, qualifiers):
                 enqueue_check_pending(
                     campaign_id, public_id,
                     backoff_hours=cfg["check_pending_recheck_after_hours"],
+                    deal=deal
                 )
             elif new_state == ProfileState.CONNECTED:
-                enqueue_follow_up(campaign_id, public_id)
+                enqueue_follow_up(campaign_id, public_id, deal=deal)
 
     except ReachedConnectionLimit as e:
         logger.warning("Rate limited: %s", e)
         session.linkedin_profile.mark_exhausted(ActionLog.ActionType.CONNECT)
-        enqueue_connect(campaign_id, delay_seconds=_seconds_until_tomorrow())
-        return
+        enqueue_connect(campaign_id, delay_seconds=_seconds_until_tomorrow(), deal=deal)
+        raise TaskSkipped(f"Connection limit: {e}")
     except SkipProfile as e:
         logger.warning("Skipping %s: %s", public_id, e)
         set_profile_state(session, public_id, ProfileState.FAILED.value)
@@ -189,12 +192,9 @@ def handle_connect(task, session, qualifiers):
 # Enqueue helpers (used by all task types)
 # ------------------------------------------------------------------
 
-def _enqueue_task(task_type: "Task.TaskType", payload: dict, delay_seconds: float, dedup_keys: list[str] | None = None):
-    """Create a pending task if no duplicate exists.
-
-    Deduplication: matches on task_type + status=PENDING + dedup_keys payload
-    fields (defaults to all payload keys).
-    """
+def _enqueue_task(task_type, payload, delay_seconds=10, dedup_keys=None, deal=None):
+    """Generic task creator with payload-based deduplication."""
+    from linkedin.models import Task
     from datetime import timedelta
 
     filter_kwargs = {
@@ -209,14 +209,16 @@ def _enqueue_task(task_type: "Task.TaskType", payload: dict, delay_seconds: floa
             task_type=task_type,
             scheduled_at=timezone.now() + timedelta(seconds=delay_seconds),
             payload=payload,
+            deal=deal,
         )
 
 
-def enqueue_connect(campaign_id: int, delay_seconds: float = 10):
+def enqueue_connect(campaign_id: int, delay_seconds: float = 10, deal=None):
     _enqueue_task(
         task_type=Task.TaskType.CONNECT,
         payload={"campaign_id": campaign_id},
         delay_seconds=delay_seconds,
+        deal=deal,
     )
 
 
@@ -224,6 +226,7 @@ def enqueue_check_pending(
     campaign_id: int,
     public_id: str,
     backoff_hours: float,
+    deal=None,
 ):
     # Equal-jitter backoff: uniform spread across [half, backoff]
     half = backoff_hours / 2
@@ -238,13 +241,15 @@ def enqueue_check_pending(
         },
         delay_seconds=delay_hours * 3600,
         dedup_keys=["campaign_id", "public_id"],
+        deal=deal,
     )
     return delay_hours
 
 
-def enqueue_follow_up(campaign_id: int, public_id: str, delay_seconds: float = 10):
+def enqueue_follow_up(campaign_id: int, public_id: str, delay_seconds: float = 10, deal=None):
     _enqueue_task(
         task_type=Task.TaskType.FOLLOW_UP,
         payload={"campaign_id": campaign_id, "public_id": public_id},
         delay_seconds=delay_seconds,
+        deal=deal,
     )

@@ -26,16 +26,31 @@ def _graphql_headers(api: PlaywrightLinkedinAPI) -> dict:
     retry=retry_if_exception_type(IOError),
     reraise=True,
 )
-def fetch_conversations(api: PlaywrightLinkedinAPI, mailbox_urn: str) -> dict:
-    """Fetch recent conversations list. Returns raw API response."""
-    url = (
-        f"{_GRAPHQL_BASE}"
-        f"?queryId={_CONVERSATIONS_QUERY_ID}"
-        f"&variables=(mailboxUrn:{encode_urn(mailbox_urn)})"
-    )
-    res = api.get(url, headers=_graphql_headers(api))
-    check_response(res, "fetch_conversations")
-    return res.json()
+def fetch_conversations(api: PlaywrightLinkedinAPI, mailbox_urn: str, max_pages: int = 5) -> list[dict]:
+    """Fetch recent conversations list, with pagination support."""
+    conversations = []
+    paging_token = None
+    
+    for _ in range(max_pages):
+        variables = f"(mailboxUrn:{encode_urn(mailbox_urn)})"
+        if paging_token:
+            variables = f"(mailboxUrn:{encode_urn(mailbox_urn)},pagingToken:{encode_urn(paging_token)})"
+            
+        url = f"{_GRAPHQL_BASE}?queryId={_CONVERSATIONS_QUERY_ID}&variables={variables}"
+        res = api.get(url, headers=_graphql_headers(api))
+        check_response(res, "fetch_conversations")
+        
+        data = res.json()
+        data_content = data.get("data", {})
+        result_node = next(iter(data_content.values()), {}) if data_content else {}
+        items = result_node.get("elements", [])
+        conversations.extend(items)
+        
+        paging_token = result_node.get("pagingToken")
+        if not paging_token:
+            break
+            
+    return conversations
 
 
 @retry(
@@ -44,16 +59,37 @@ def fetch_conversations(api: PlaywrightLinkedinAPI, mailbox_urn: str) -> dict:
     retry=retry_if_exception_type(IOError),
     reraise=True,
 )
-def fetch_messages(api: PlaywrightLinkedinAPI, conversation_urn: str) -> dict:
-    """Fetch messages for a conversation. Returns raw API response."""
-    url = (
-        f"{_GRAPHQL_BASE}"
-        f"?queryId={_MESSAGES_QUERY_ID}"
-        f"&variables=(conversationUrn:{encode_urn(conversation_urn)})"
-    )
-    res = api.get(url, headers=_graphql_headers(api))
-    check_response(res, "fetch_messages")
-    return res.json()
+def fetch_messages(api: PlaywrightLinkedinAPI, conversation_urn: str, max_pages: int = 5) -> list[dict]:
+    """Fetch messages for a conversation, with pagination support."""
+    messages = []
+    paging_token = None
+    
+    for _ in range(max_pages):
+        variables = f"(conversationUrn:{encode_urn(conversation_urn)})"
+        if paging_token:
+            variables = f"(conversationUrn:{encode_urn(conversation_urn)},pagingToken:{encode_urn(paging_token)})"
+            
+        url = f"{_GRAPHQL_BASE}?queryId={_MESSAGES_QUERY_ID}&variables={variables}"
+        res = api.get(url, headers=_graphql_headers(api))
+        check_response(res, "fetch_messages")
+        
+        data = res.json()
+        data_content = data.get("data", {})
+        
+        # Robust key handling: Voyager can use both URN-based or SyncToken-based keys
+        result_node = data_content.get("messengerMessagesByConversationUrn") or \
+                      data_content.get("messengerMessagesBySyncToken") or \
+                      next(iter(data_content.values()), {})
+                      
+        items = result_node.get("elements", [])
+        messages.extend(items)
+        
+        paging_token = result_node.get("pagingToken")
+        if not paging_token:
+            break
+            
+    return messages
+
 
 
 if __name__ == "__main__":
@@ -71,8 +107,7 @@ if __name__ == "__main__":
 
     if args.conversations:
         mailbox_urn = session.self_profile["urn"]
-        raw = fetch_conversations(api, mailbox_urn)
-        elements = raw.get("data", {}).get("messengerConversationsBySyncToken", {}).get("elements", [])
+        elements = fetch_conversations(api, mailbox_urn)
         print(f"Got {len(elements)} conversations:\n")
         for conv in elements:
             urn = conv.get("entityUrn", "")
@@ -88,8 +123,10 @@ if __name__ == "__main__":
             print(f"    URN: {urn}\n")
 
     elif args.messages:
-        raw = fetch_messages(api, args.messages)
-        print(json.dumps(raw, indent=2, default=str)[:10000])
+        messages = fetch_messages(api, args.messages)
+        print(f"Fetched {len(messages)} messages.")
+        print(json.dumps(messages, indent=2, default=str)[:10000])
+
 
     else:
         parser.print_help()

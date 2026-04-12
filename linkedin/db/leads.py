@@ -57,9 +57,6 @@ def promote_lead_to_deal(session, public_id: str, reason: str = ""):
     if not lead:
         raise ValueError(f"No Lead for {public_id}")
 
-    if not lead.company_name:
-        raise ValueError(f"Lead {public_id} has no company_name — cannot create Deal")
-
     deal = Deal.objects.create(
         lead=lead,
         campaign=session.campaign,
@@ -153,4 +150,4 @@ def _update_lead_fields(lead, profile: Dict[str, Any]):
         lead.company_name = positions[0].get("company_name", "") or ""
 
     lead.profile_data = profile
-    lead.save()
+    lead.save(update_fields=["first_name", "last_name", "company_name", "profile_data"])

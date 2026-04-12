@@ -211,7 +211,8 @@ def _send_msg_pop_up(session, profile: Dict[str, Any], message: str) -> bool:
 def _send_message(session, profile: Dict[str, Any], message: str) -> bool:
     """Navigate to /messaging/thread/new/, search by name, compose, send."""
     public_identifier = profile.get("public_identifier")
-    full_name = profile.get("full_name")
+    full_name = profile.get("full_name") or \
+        f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
     if not full_name:
         logger.error("Cannot send via direct thread: no full_name for %s", public_identifier)
         return False

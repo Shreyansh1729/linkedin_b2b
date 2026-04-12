@@ -39,6 +39,7 @@ def playwright_login(session: "AccountSession"):
     human_type(page.locator(SELECTORS["email"]), lp.linkedin_username)
     session.wait()
     human_type(page.locator(SELECTORS["password"]), lp.linkedin_password)
+
     session.wait()
 
     goto_page(

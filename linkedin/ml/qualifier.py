@@ -55,7 +55,6 @@ def qualify_with_llm(profile_text: str, product_docs: str, campaign_objective: s
     from linkedin.conf import get_llm_config
 
     llm_api_key, ai_model, llm_api_base = get_llm_config()
-    ai_model = "gemini-3.1-pro-preview"  # Hard-coded override per user request
     if not llm_api_key:
         raise ValueError("LLM_API_KEY is not set in Site Configuration.")
 
@@ -308,17 +307,12 @@ class BayesianQualifier:
         return X[keep], y[keep]
 
     def _persist_pipeline(self):
-        """Persist the fitted pipeline to the Campaign.model_blob DB field."""
+        """Persist the fitted pipeline to the models/ filesystem directory."""
         if self._campaign is None or self._pipeline is None:
             return
-        import io
-        import joblib
+        self._campaign.save_ml_model(self._pipeline)
+        logger.debug("Pipeline saved to filesystem for campaign %s", self._campaign)
 
-        buf = io.BytesIO()
-        joblib.dump(self._pipeline, buf)
-        self._campaign.model_blob = buf.getvalue()
-        self._campaign.save(update_fields=["model_blob"])
-        logger.debug("Pipeline saved to DB for campaign %s", self._campaign)
 
     # ------------------------------------------------------------------
     # Prediction  (needs posterior std — uses _gpr_predict)

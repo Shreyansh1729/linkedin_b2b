@@ -69,7 +69,11 @@ def _inspect_ui(session, profile: Dict[str, Any]) -> ProfileState:
         logger.debug("UI → 'Connect' in More menu")
         return ProfileState.QUALIFIED
 
-    logger.debug("UI → no connect/pending indicators — dumping page")
+    if top_card.locator('button[aria-label*="Message"]:visible').count() > 0:
+        logger.debug("UI → 'Message' button detected — CONNECTED")
+        return ProfileState.CONNECTED
+
+    logger.debug("UI → no connect/pending/message indicators — dumping page")
     dump_page_html(session, profile, category="status")
     return ProfileState.QUALIFIED
 

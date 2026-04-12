@@ -32,13 +32,13 @@ def handle_send_message(task, session, qualifiers=None):
     try:
         msg = ChatMessage.objects.get(pk=message_id)
     except ChatMessage.DoesNotExist:
-        logger.error("send_message: ChatMessage %s no longer exists — aborting", message_id)
-        return
+        error_msg = f"send_message: ChatMessage {message_id} no longer exists — aborting"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
     profile_dict = get_profile_dict_for_public_id(session, public_id)
     if profile_dict is None:
-        logger.warning("send_message: no Deal for %s — skipping", public_id)
-        return
+        raise RuntimeError(f"No Deal found for {public_id}")
 
     profile = profile_dict.get("profile") or profile_dict
 
@@ -46,9 +46,7 @@ def handle_send_message(task, session, qualifiers=None):
     sent = send_raw_message(session, profile, msg.content)
     
     if not sent:
-        logger.warning("send_message for %s: send failed — UI might be blocked.", public_id)
-        task.mark_failed("LinkedIn blocked the message delivery (UI failed).")
-        return
+        raise RuntimeError("LinkedIn blocked the message delivery (UI failed).")
 
     # Assuming success, remove draft suffix if it exists, record rate limit actions
     if msg.linkedin_urn.startswith("draft_"):
@@ -61,10 +59,12 @@ def handle_send_message(task, session, qualifiers=None):
         session.campaign,
         target_name=name,
         target_public_id=public_id,
-        status="success" if sent else "failed",
-        note=f"Message: {msg.content[:50]}..." if sent else "Message delivery failed"
+        status="success",
+        note=f"Message: {msg.content[:50]}..."
     )
     
     # Schedule next follow up in 24 hours (default) since the AI already made a decision prior
-    enqueue_follow_up(campaign_id, public_id, delay_seconds=24 * 3600)
+    from crm.models.deal import Deal
+    deal = Deal.objects.filter(lead__public_identifier=public_id, campaign_id=campaign_id).first()
+    enqueue_follow_up(campaign_id, public_id, delay_seconds=24 * 3600, deal=deal)
     logger.info("Message dispatched successfully. Next follow-up delayed 24h.")

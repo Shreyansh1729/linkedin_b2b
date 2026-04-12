@@ -9,7 +9,10 @@ def _get_lead_and_ct(public_identifier: str):
     from django.contrib.contenttypes.models import ContentType
     from crm.models import Lead
 
-    lead = Lead.objects.get(public_identifier=public_identifier)
+    lead = Lead.objects.filter(public_identifier=public_identifier).first()
+    if lead is None:
+        raise ValueError(f"No Lead found for public_identifier={public_identifier!r}")
+    
     ct = ContentType.objects.get_for_model(lead)
     return lead, ct
 
@@ -23,7 +26,8 @@ def sync_conversation(session, public_identifier: str) -> list[dict]:
     lead, ct = _get_lead_and_ct(public_identifier)
     _sync_from_api(session, public_identifier, lead, ct)
 
-    return _read_from_db(public_identifier)
+    # Optimized (MED-01): Pass objects directly to avoid redundant lookup
+    return _read_from_db(lead, ct)
 
 
 def _sync_from_api(session, public_identifier: str, lead, ct):
@@ -49,9 +53,9 @@ def _sync_from_api(session, public_identifier: str, lead, ct):
         logger.debug("sync: no conversation found for %s", public_identifier)
         return
 
-    # Fetch messages
-    raw = fetch_messages(api, conversation_urn)
-    elements = raw.get("data", {}).get("messengerMessagesBySyncToken", {}).get("elements", [])
+    # Fetch messages (returns a flat list of elements from multiple pages)
+    elements = fetch_messages(api, conversation_urn)
+
 
     self_urn = session.self_profile["urn"]
 
@@ -80,11 +84,10 @@ def _sync_from_api(session, public_identifier: str, lead, ct):
     logger.debug("sync: processed %d messages for %s", len(elements), public_identifier)
 
 
-def _read_from_db(public_identifier: str) -> list[dict]:
+def _read_from_db(lead, ct) -> list[dict]:
     """Read all ChatMessages for a lead, sorted chronologically."""
     from chat.models import ChatMessage
 
-    lead, ct = _get_lead_and_ct(public_identifier)
     lead_name = f"{lead.first_name or ''} {lead.last_name or ''}".strip() or "them"
 
     messages = ChatMessage.objects.filter(

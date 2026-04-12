@@ -100,7 +100,6 @@ def run_follow_up_agent(
     system_prompt = _render_system_prompt(session, profile, conversation_text)
 
     llm_api_key, ai_model, llm_api_base = get_llm_config()
-    ai_model = "gemini-3.1-pro-preview"  # Hard-coded override per user request
     if "gemini" in ai_model.lower():
         llm = ChatGoogleGenerativeAI(
             model=ai_model,

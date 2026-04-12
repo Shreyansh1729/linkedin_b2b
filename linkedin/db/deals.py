@@ -9,12 +9,12 @@ logger = logging.getLogger(__name__)
 
 _STATE_LOG_STYLE = {
     ProfileState.QUALIFIED: ("QUALIFIED", "green", []),
-    ProfileState.READY_TO_CONNECT: ("READY_TO_CONNECT", "yellow", ["bold"]),
     ProfileState.PENDING: ("PENDING", "cyan", []),
     ProfileState.CONNECTED: ("CONNECTED", "green", ["bold"]),
     ProfileState.COMPLETED: ("COMPLETED", "green", ["bold"]),
     ProfileState.FAILED: ("FAILED", "red", ["bold"]),
 }
+
 
 
 def increment_connect_attempts(session, public_id: str) -> int:
@@ -32,8 +32,8 @@ def increment_connect_attempts(session, public_id: str) -> int:
     return deal.connect_attempts
 
 
-def _deal_to_profile_dict(deal) -> dict:
-    """Convert a Deal (with select_related lead) to a profile dict for lanes."""
+def deal_to_profile_dict(deal) -> dict:
+    """Convert a Deal (with select_related lead) to a profile dict."""
     base = deal.lead.to_profile_dict()
     base["meta"] = {
         "connect_attempts": deal.connect_attempts,
@@ -42,19 +42,7 @@ def _deal_to_profile_dict(deal) -> dict:
     }
     return base
 
-
-def _deals_at_state(session, state: ProfileState) -> list:
-    """Return profile dicts for all Deals at the given state in this campaign."""
-    from crm.models import Deal
-
-    qs = Deal.objects.filter(
-        state=state,
-        campaign=session.campaign,
-    ).select_related("lead")
-    return [_deal_to_profile_dict(d) for d in qs]
-
-
-def _existing_deal_or_lead(public_id: str, campaign):
+# ── Existing entity lookup ──
     """Check for an existing Deal in campaign; if none, look up the Lead.
 
     Returns (lead, existing_deal) — exactly one will be non-None,
@@ -88,17 +76,21 @@ def set_profile_state(session, public_identifier: str, new_state: str, reason: s
     state_changed = (deal.state != ps)
 
     deal.state = ps
+    update_fields = ["state"]
 
     if reason:
         deal.reason = reason
+        update_fields.append("reason")
 
     if ps == ProfileState.FAILED:
         deal.closing_reason = ClosingReason.FAILED
+        update_fields.append("closing_reason")
 
     if ps == ProfileState.COMPLETED:
         deal.closing_reason = ClosingReason.COMPLETED
+        update_fields.append("closing_reason")
 
-    deal.save()
+    deal.save(update_fields=update_fields)
 
     label, color, attrs = _STATE_LOG_STYLE.get(ps, ("ERROR", "red", ["bold"]))
     suffix = f" ({reason})" if reason else ""
@@ -112,14 +104,18 @@ def set_profile_state(session, public_identifier: str, new_state: str, reason: s
 
 
 def get_qualified_profiles(session) -> list:
-    return _deals_at_state(session, ProfileState.QUALIFIED)
+    # Inline (LOW-03): _deals_at_state is a one-caller wrapper
+    from crm.models import Deal
 
-
-def get_ready_to_connect_profiles(session) -> list:
-    return _deals_at_state(session, ProfileState.READY_TO_CONNECT)
+    qs = Deal.objects.filter(
+        state=ProfileState.QUALIFIED,
+        campaign=session.campaign,
+    ).select_related("lead")
+    return [deal_to_profile_dict(d) for d in qs]
 
 
 def get_profile_dict_for_public_id(session, public_id: str) -> dict | None:
+
     """Load profile dict for a single public_id from Deal + Lead (campaign-scoped)."""
     from crm.models import Deal
 
@@ -130,7 +126,7 @@ def get_profile_dict_for_public_id(session, public_id: str) -> dict | None:
     )
     if not deal:
         return None
-    return _deal_to_profile_dict(deal)
+    return deal_to_profile_dict(deal)
 
 
 # ── Deal creation ──

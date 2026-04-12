@@ -26,8 +26,20 @@ class Command(BaseCommand):
         session = self._create_session()
         self._ensure_newsletter(session)
 
+        import signal
+        def graceful_exit(sig, frame):
+            logger.info("Termination signal received. Closing session...")
+            session.close()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, graceful_exit)
+        signal.signal(signal.SIGTERM, graceful_exit)
+
         from linkedin.daemon import run_daemon
-        run_daemon(session)
+        try:
+            run_daemon(session)
+        finally:
+            session.close()
 
     # -- Steps ---------------------------------------------------------------
 

@@ -5,15 +5,26 @@ Minimal Django settings for LeadPilot - Premium Unfold UI (Fixed).
 import os
 import sys
 from pathlib import Path
+from django.core.exceptions import ImproperlyConfigured
 
 # Playwright's sync API runs inside an async event loop
 os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BASE_DIR = ROOT_DIR
-SECRET_KEY = "leadpilot-local-dev-key-change-in-production"
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if os.environ.get("ENV") == "production":
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set in production.")
+    SECRET_KEY = "leadpilot-local-dev-key-change-in-production"
+
+DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
+
+raw_hosts = os.environ.get("ALLOWED_HOSTS", "*" if DEBUG else "")
+ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
+
+if not ALLOWED_HOSTS and not DEBUG:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must be set in production.")
 
 INSTALLED_APPS = [
     "unfold",
@@ -28,9 +39,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "corsheaders",
-    "crm.apps.CrmConfig",
-    "chat.apps.ChatConfig",
+    "import_export",
+    "simple_history",
     "linkedin",
+    "crm",
+    "chat",
 ]
 
 MIDDLEWARE = [
@@ -43,9 +56,10 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "simple_history.middleware.HistoryRequestMiddleware",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = os.environ.get("CORS_ALLOW_ALL", "false").lower() == "true"
 ROOT_URLCONF = "linkedin.urls"
 
 TEMPLATES = [
@@ -105,3 +119,49 @@ UNFOLD = {
 }
 
 TESTING = sys.argv[1:2] == ["test"]
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+        },
+        "file": {
+            "level": "INFO",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": ROOT_DIR / "leadpilot.log",
+            "maxBytes": 1024 * 1024 * 5,  # 5MB
+            "backupCount": 5,
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console", "file"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "linkedin": {
+            "handlers": ["console", "file"],
+            "level": "DEBUG" if DEBUG else "INFO",
+            "propagate": False,
+        },
+    },
+}
+

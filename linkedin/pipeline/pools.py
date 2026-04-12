@@ -25,13 +25,13 @@ import numpy as np
 from linkedin.conf import CAMPAIGN_CONFIG
 from linkedin.ml.qualifier import BayesianQualifier
 from linkedin.pipeline.qualify import fetch_qualification_candidates, run_qualification
-from linkedin.pipeline.ready_pool import find_ready_candidate, promote_to_ready
 from linkedin.pipeline.search import run_search
 
 logger = logging.getLogger(__name__)
 
 
 def _needs_search(qualifier: BayesianQualifier, candidates) -> bool:
+
     """True only in exploit mode when no candidate meets the adaptive threshold.
 
     Effective threshold = max(0, base - 1/sqrt(n_obs)).
@@ -126,36 +126,36 @@ def qualify_source(session, qualifier: BayesianQualifier) -> Generator[str, None
         yield result
 
 
-def ready_source(session, qualifier: BayesianQualifier, threshold: float | None = None) -> Generator[dict, None, None]:
-    """Yield ready-to-connect candidates, pulling from qualify when needed."""
-    if threshold is None:
-        threshold = CAMPAIGN_CONFIG["min_ready_to_connect_prob"]
-    qualify = qualify_source(session, qualifier)
-
-    while True:
-        candidate = find_ready_candidate(session, qualifier)
-        if candidate is not None:
-            yield candidate
-            continue
-
-        promoted = promote_to_ready(session, qualifier, threshold)
-        if promoted > 0:
-            continue
-
-        # Pull one qualification from upstream — may shift the GP model
-        if next(qualify, None) is not None:
-            # Re-check promote after new label
-            promote_to_ready(session, qualifier, threshold)
-            continue
-
-        # Upstream exhausted
-        return
-
-
 def find_candidate(session, qualifier: BayesianQualifier) -> dict | None:
-    """Top profile ready for connection, backfilling if needed.
+    """Top profile ready for connection, backfilling via qualification if needed."""
+    from crm.models import Deal
+    from linkedin.enums import ProfileState
+    from linkedin.url_utils import url_to_public_id
 
-    Only used by regular campaigns. Freemium campaigns use
-    find_freemium_candidate() from pipeline.freemium_pool instead.
-    """
-    return next(ready_source(session, qualifier), None)
+    # 1. Look for existing QUALIFIED deals in this campaign
+    existing = Deal.objects.filter(
+        campaign=session.campaign,
+        state=ProfileState.QUALIFIED
+    ).select_related("lead").first()
+
+    if existing:
+        return {
+            "public_id": url_to_public_id(existing.lead.linkedin_url),
+            "name": f"{existing.lead.first_name} {existing.lead.last_name}",
+        }
+
+    # 2. If none, pull one from qualification pipeline
+    # This will trigger search -> fetch -> run_qualification
+    qualify = qualify_source(session, qualifier)
+    public_id = next(qualify, None)
+    
+    if public_id:
+        from crm.models import Lead
+        lead = Lead.objects.get(public_identifier=public_id)
+        return {
+            "public_id": public_id,
+            "name": f"{lead.first_name} {lead.last_name}",
+        }
+
+    return None
+

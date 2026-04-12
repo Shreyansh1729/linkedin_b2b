@@ -46,6 +46,8 @@ class OnboardConfig:
     llm_api_base: str = ""
     newsletter: bool = True
     connect_daily_limit: int = DEFAULT_CONNECT_DAILY_LIMIT
+    connect_weekly_limit: int = DEFAULT_CONNECT_WEEKLY_LIMIT
+    follow_up_daily_limit: int = DEFAULT_FOLLOW_UP_DAILY_LIMIT
 
     @classmethod
     def from_json(cls, path: str) -> OnboardConfig:
@@ -84,12 +86,11 @@ def missing_keys() -> set[str]:
         keys |= _ACCOUNT_KEYS
 
     cfg = SiteConfig.load()
-    if not cfg.llm_api_key:
-        keys.add("llm_api_key")
-    if not cfg.ai_model:
-        keys.add("ai_model")
-    if not cfg.llm_api_base:
-        keys.add("llm_api_base")
+    if not cfg:
+        keys |= _LLM_KEYS
+    else:
+        if not cfg.llm_api_key: keys.add("llm_api_key")
+        if not cfg.ai_model: keys.add("ai_model")
 
     return keys
 
@@ -116,8 +117,11 @@ SELF_HOSTED_QUESTIONS = [
     Question("booking_link", "Booking Link (optional)", required=False),
     Question("seed_urls", "Seed LinkedIn URLs (comma separated)", required=False),
     Question("llm_api_key", "LLM API Key (Gemini/OpenAI)"),
-    Question("ai_model", "AI Model Name", default="gemini-1.5-pro"),
+    Question("ai_model", "Model Identifier", default="gemini-1.5-pro"),
     Question("llm_api_base", "LLM API Base URL (optional)", required=False),
+    Question("connect_daily_limit", "Daily Connection Limit", default=str(DEFAULT_CONNECT_DAILY_LIMIT)),
+    Question("connect_weekly_limit", "Weekly Connection Limit", default=str(DEFAULT_CONNECT_WEEKLY_LIMIT)),
+    Question("follow_up_daily_limit", "Daily Follow-up Limit", default=str(DEFAULT_FOLLOW_UP_DAILY_LIMIT)),
 ]
 
 
@@ -163,6 +167,14 @@ def collect_from_wizard() -> OnboardConfig:
     answers = ask(questions)
     if answers is None:
         raise SystemExit("Onboarding cancelled.")
+
+    # Cast numeric inputs
+    for key in ["connect_daily_limit", "connect_weekly_limit", "follow_up_daily_limit"]:
+        if key in answers:
+            try:
+                answers[key] = int(answers[key])
+            except ValueError:
+                pass
 
     return OnboardConfig(**{
         k: v for k, v in answers.items()
@@ -220,7 +232,8 @@ def _create_account(
         user.set_unusable_password()
         user.save()
 
-    campaign.users.add(user)
+    if campaign:
+        campaign.users.add(user)
 
     profile = LinkedInProfile.objects.create(
         user=user,
@@ -234,6 +247,13 @@ def _create_account(
 
     logger.info("Created LinkedIn profile for %s (handle=%s)", email, handle)
     print(f"Account '{handle}' created!")
+
+    from termcolor import colored
+    if user.is_staff:
+        print(colored(f"\nWARNING: User '{handle}' created with NO password.", "red", attrs=["bold"]))
+        print(f"To log in to the Django dashboard, you MUST run:")
+        print(f"  python manage.py create_admin_user {handle}\n")
+
     return profile
 
 
@@ -258,29 +278,34 @@ def apply(config: OnboardConfig) -> None:
     from linkedin.models import Campaign, LinkedInProfile, SiteConfig
 
     # 1. Campaign & Seeds
-    campaign = Campaign.objects.first()
-    if campaign is None and config.campaign_name:
-        product_docs = config.product_description or _read_default_file(DEFAULT_PRODUCT_DOCS)
-        objective = config.campaign_objective or _read_default_file(DEFAULT_CAMPAIGN_OBJECTIVE)
-        
-        campaign = _create_campaign(
-            name=config.campaign_name,
-            product_docs=product_docs,
-            objective=objective,
-            booking_link=config.booking_link,
-        )
-        if config.seed_urls:
-            _create_seed_leads(campaign, config.seed_urls)
+    campaign = None
+    if config.campaign_name:
+        campaign = Campaign.objects.filter(name=config.campaign_name).first()
+        if campaign is None:
+            product_docs = config.product_description or _read_default_file(DEFAULT_PRODUCT_DOCS)
+            objective = config.campaign_objective or _read_default_file(DEFAULT_CAMPAIGN_OBJECTIVE)
+            
+            campaign = _create_campaign(
+                name=config.campaign_name,
+                product_docs=product_docs,
+                objective=objective,
+                booking_link=config.booking_link,
+            )
+            if config.seed_urls:
+                _create_seed_leads(campaign, config.seed_urls)
 
     # 2. LinkedIn Account
-    if not LinkedInProfile.objects.filter(active=True).exists() and config.linkedin_email:
+    if config.linkedin_email and not LinkedInProfile.objects.filter(linkedin_username=config.linkedin_email).exists():
         _create_account(
             campaign,
             config.linkedin_email,
             config.linkedin_password,
             subscribe=config.newsletter,
             connect_daily=config.connect_daily_limit,
+            connect_weekly=config.connect_weekly_limit,
+            follow_up_daily=config.follow_up_daily_limit,
         )
+
 
     # 3. LLM Configuration
     cfg = SiteConfig.load()
@@ -293,3 +318,12 @@ def apply(config: OnboardConfig) -> None:
     cfg.save()
 
     logger.info("Onboarding successful — LeadPilot is ready.")
+    print("\n" + "="*60)
+    print("🚀 SUCCESS: Onboarding complete. LeadPilot is ready.")
+    print("="*60)
+    print("\n🛡️  SECURITY NOTE: Your Django user accounts have been created with")
+    print("   UNUSABLE passwords for safety.")
+    print("\n👉 To log in to the admin dashboard, you MUST set an admin password.")
+    print(f"   Run this command now:")
+    print(f"\n      python manage.py create_admin_user {config.linkedin_email}")
+    print("\n" + "="*60)

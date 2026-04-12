@@ -36,17 +36,17 @@ HUMAN_TYPE_MAX_DELAY_MS = 200
 # ----------------------------------------------------------------------
 # Onboarding defaults (shown to user during interactive setup)
 # ----------------------------------------------------------------------
-DEFAULT_CONNECT_DAILY_LIMIT = 50
-DEFAULT_CONNECT_WEEKLY_LIMIT = 250
+DEFAULT_CONNECT_DAILY_LIMIT = 20
+DEFAULT_CONNECT_WEEKLY_LIMIT = 80
 DEFAULT_FOLLOW_UP_DAILY_LIMIT = 100
 
 # ----------------------------------------------------------------------
 # Active-hours schedule (daemon pauses outside this window)
 # Set to False to run 24/7.
 # ----------------------------------------------------------------------
-ENABLE_ACTIVE_HOURS = False
-ACTIVE_START_HOUR = 10   # inclusive, local time
-ACTIVE_END_HOUR = 20    # exclusive, local time
+ENABLE_ACTIVE_HOURS = True
+ACTIVE_START_HOUR = 9    # inclusive, local time
+ACTIVE_END_HOUR = 18    # exclusive, local time
 ACTIVE_TIMEZONE = "UTC"
 REST_DAYS = (5, 6)      # 0=Mon … 6=Sun; default Sat+Sun off
 
@@ -74,4 +74,5 @@ def get_llm_config():
     from linkedin.models import SiteConfig
     cfg = SiteConfig.load()
     return cfg.llm_api_key, cfg.ai_model, cfg.llm_api_base or None
+
 

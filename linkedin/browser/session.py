@@ -69,7 +69,9 @@ class AccountSession:
 
     def wait(self, min_delay=MIN_DELAY, max_delay=MAX_DELAY):
         random_sleep(min_delay, max_delay)
-        self.page.wait_for_load_state("load")
+        if self.page and not self.page.is_closed():
+            self.page.wait_for_load_state("load")
+
 
     def _maybe_refresh_cookies(self):
         """Re-login if the li_at auth cookie in the saved DB state is expired."""

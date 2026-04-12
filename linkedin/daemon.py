@@ -9,8 +9,9 @@ from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 from django.utils import timezone
-
 from termcolor import colored
+
+from linkedin.exceptions import TaskSkipped
 
 from linkedin.conf import (
     ACTIVE_END_HOUR,
@@ -42,7 +43,7 @@ _HANDLERS = {
 
 
 
-def _build_qualifiers(campaigns, cfg, kit_model=None):
+def _build_qualifiers(campaigns, cfg):
     """Create a qualifier for every campaign, keyed by campaign PK."""
     from crm.models import Lead
 
@@ -50,32 +51,34 @@ def _build_qualifiers(campaigns, cfg, kit_model=None):
     n_regular = 0
     for campaign in campaigns:
         if campaign.is_freemium:
-            if kit_model is None:
-                continue
-            qualifiers[campaign.pk] = KitQualifier(kit_model)
-        else:
-            q = BayesianQualifier(
-                seed=42,
-                n_mc_samples=cfg["qualification_n_mc_samples"],
-                campaign=campaign,
+            km = campaign.load_ml_model()
+            if km:
+                qualifiers[campaign.pk] = KitQualifier(km)
+                logger.info(colored("Kit model loaded", "cyan") + " for freemium campaign %s", campaign)
+            continue
+        
+        q = BayesianQualifier(
+            seed=42,
+            n_mc_samples=cfg["qualification_n_mc_samples"],
+            campaign=campaign,
+        )
+        X, y = Lead.get_labeled_arrays(campaign)
+        if len(X) > 0:
+            q.warm_start(X, y)
+            logger.info(
+                colored("GP qualifier warm-started", "cyan")
+                + " on %d labelled samples (%d positive, %d negative)"
+                + " for campaign %s",
+                len(y), int((y == 1).sum()), int((y == 0).sum()), campaign,
             )
-            X, y = Lead.get_labeled_arrays(campaign)
-            if len(X) > 0:
-                q.warm_start(X, y)
-                logger.info(
-                    colored("GP qualifier warm-started", "cyan")
-                    + " on %d labelled samples (%d positive, %d negative)"
-                    + " for campaign %s",
-                    len(y), int((y == 1).sum()), int((y == 0).sum()), campaign,
-                )
-            qualifiers[campaign.pk] = q
-            n_regular += 1
+        qualifiers[campaign.pk] = q
+        n_regular += 1
 
     return qualifiers
 
 
 # ------------------------------------------------------------------
-# Active-hours schedule guard
+# Schedule guard
 # ------------------------------------------------------------------
 
 
@@ -115,7 +118,6 @@ def heal_tasks(session):
     4. Create 'follow_up' tasks for CONNECTED profiles without tasks
     """
     from crm.models import Deal
-    from linkedin.url_utils import url_to_public_id
     from linkedin.enums import ProfileState
 
     cfg = CAMPAIGN_CONFIG
@@ -141,11 +143,11 @@ def heal_tasks(session):
         ).select_related("lead")
 
         for deal in pending_deals:
-            public_id = url_to_public_id(deal.lead.linkedin_url) if deal.lead.linkedin_url else None
+            public_id = deal.lead.public_identifier
             if not public_id:
                 continue
             backoff = deal.backoff_hours or cfg["check_pending_recheck_after_hours"]
-            enqueue_check_pending(campaign.pk, public_id, backoff_hours=backoff)
+            enqueue_check_pending(campaign.pk, public_id, backoff_hours=backoff, deal=deal)
 
     # 4. Follow_up tasks for CONNECTED profiles
     from chat.models import ChatMessage
@@ -159,15 +161,14 @@ def heal_tasks(session):
         ).select_related("lead")
 
         for deal in connected_deals:
-            public_id = url_to_public_id(deal.lead.linkedin_url) if deal.lead.linkedin_url else None
+            public_id = deal.lead.public_identifier
             if not public_id:
                 continue
-                
-            # HitL Barrier: Check if AI has drafted a message waiting for Human Approval
-            content_type = ContentType.objects.get_for_model(Deal)
+            
+            # Check for existing pending draft OR pending SEND_MESSAGE task
             has_pending_draft = ChatMessage.objects.filter(
-                content_type=content_type, 
-                object_id=deal.pk, 
+                content_type=ContentType.objects.get_for_model(deal.lead),
+                object_id=deal.lead.pk, 
                 is_draft=True
             ).exists()
             
@@ -178,9 +179,10 @@ def heal_tasks(session):
             ).exists()
 
             if has_pending_draft or has_send_task:
-                continue  # Yield to human authority, do not restart follow_up logic
+                continue
 
-            enqueue_follow_up(campaign.pk, public_id, delay_seconds=random.uniform(5, 60))
+            enqueue_follow_up(campaign.pk, public_id, delay_seconds=random.uniform(5, 60), deal=deal)
+
 
     pending_count = Task.objects.pending().count()
     logger.info("Task queue healed: %d pending tasks", pending_count)
@@ -191,9 +193,7 @@ def run_daemon(session):
 
     cfg = CAMPAIGN_CONFIG
 
-    qualifiers = _build_qualifiers(
-        session.campaigns, cfg, kit_model=None,
-    )
+    qualifiers = _build_qualifiers(session.campaigns, cfg)
 
     # Startup healing
     heal_tasks(session)
@@ -249,10 +249,12 @@ def run_daemon(session):
         try:
             with failure_diagnostics(session):
                 handler(task, session, qualifiers)
+            task.mark_completed()
+        except TaskSkipped as e:
+            task.mark_skipped(str(e))
+            logger.info("Task %s skipped: %s", task, str(e))
         except Exception:
             task.mark_failed(traceback.format_exc())
             logger.exception("Task %s failed", task)
             continue
-
-        task.mark_completed()
 

@@ -13,7 +13,12 @@ class ChatMessage(models.Model):
     class Meta:
         verbose_name = _("message")
         verbose_name_plural = _("messages")
-            
+
+    campaign = models.ForeignKey(
+        "linkedin.Campaign", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="messages",
+        verbose_name=_("Campaign")
+    )
     content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
     object_id = models.PositiveIntegerField(db_index=True)
     content_object = GenericForeignKey('content_type', 'object_id')
@@ -27,29 +32,11 @@ class ChatMessage(models.Model):
         verbose_name=_("Owner"),
         related_name="%(app_label)s_%(class)s_owner_related",
     )
-    answer_to = models.ForeignKey(
-        'self', blank=True, null=True, on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_answer_to_related",
-        verbose_name=_("answer to")
-    )
-    topic = models.ForeignKey(
-        'self', blank=True, null=True, on_delete=models.CASCADE,
-        related_name="%(app_label)s_%(class)s_topic_related",
-    )
-    recipients = models.ManyToManyField(
-        settings.AUTH_USER_MODEL, blank=True,
-        verbose_name=_("recipients"),
-        related_name="%(app_label)s_%(class)s_recipients_related",
-    )
-    to = models.ManyToManyField(
-        settings.AUTH_USER_MODEL, blank=True,
-        verbose_name=_("to"),
-        related_name="%(app_label)s_%(class)s_to_related",
-    )
     creation_date = models.DateTimeField(
         default=timezone.now,
         verbose_name=_("Creation date")
     )
+
     linkedin_urn = models.CharField(
         max_length=300, unique=True,
         verbose_name=_("LinkedIn message URN"),

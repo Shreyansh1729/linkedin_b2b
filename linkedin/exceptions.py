@@ -1,18 +1,16 @@
-class AuthenticationError(Exception):
-    """Custom exception for 401 Unauthorized errors."""
+
+class TaskSkipped(Exception):
+    """Exception raised when a task is skipped due to rate limits or other non-error reasons."""
     pass
-
-
-class TerminalStateError(Exception):
-    """Profile is already done or dead — caller must skip it"""
-    pass
-
 
 class SkipProfile(Exception):
-    """Profile must be skipped."""
+    """Exception raised when a specific profile should be skipped during processing."""
     pass
 
+class AuthenticationError(Exception):
+    """Exception raised when authentication fails or session expires."""
+    pass
 
 class ReachedConnectionLimit(Exception):
-    """ Weekly connection limit reached. """
+    """Exception raised when LinkedIn's connection request limit is reached."""
     pass
